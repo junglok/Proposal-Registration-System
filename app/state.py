@@ -565,34 +565,6 @@ class AuthState(rx.State):
             self.reset_error = None
 
     @rx.event
-    @rx.event
-    def set_new_password(self, value: str):
-        self.new_password = value
-        self.new_password_error = None
-
-    @rx.event
-    def set_new_password_confirm(self, value: str):
-        self.new_password_confirm = value
-        self.new_password_error = None
-
-    def _validate_new_passwords(self):
-        new = self.new_password.strip()
-        confirm = self.new_password_confirm.strip()
-        if not new:
-            self.new_password_error = "Password is required."
-            return False
-        if len(new) < 8:
-            self.new_password_error = "Password must be at least 8 characters."
-            return False
-        if new != confirm:
-            self.new_password_error = "Passwords do not match."
-            return False
-        self.new_password = new
-        self.new_password_confirm = confirm
-        self.new_password_error = None
-        return True
-
-    @rx.event
     def set_new_password(self, value: str):
         self.new_password = value
         self.new_password_error = None
