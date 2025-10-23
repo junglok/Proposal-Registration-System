@@ -3,6 +3,8 @@ from app.state import AuthState, db, Proposal
 import re
 import uuid
 import datetime
+from pathlib import Path
+from reflex.event import PointerEventInfo
 
 
 class ProposalState(AuthState):
@@ -27,6 +29,62 @@ class ProposalState(AuthState):
     selected_proposal: Proposal | None = None
     is_editing: bool = False
     edit_proposal_id: str = ""
+    refresh_token: str = ""
+    show_delete_confirm: bool = False
+    pending_delete_proposal: Proposal | None = None
+
+    @rx.var
+    def selected_proposal_files(self) -> list[str]:
+        """Returns the file names associated with the selected proposal."""
+        if self.selected_proposal:
+            value = self.selected_proposal["proposal_file"]
+            if isinstance(value, list):
+                return [str(item) for item in value if item]
+            if isinstance(value, str) and value:
+                return [value]
+        return []
+
+    @rx.var
+    def has_selected_proposal_files(self) -> bool:
+        if self.selected_proposal:
+            value = self.selected_proposal["proposal_file"]
+            if isinstance(value, list):
+                return any(value)
+            if isinstance(value, str):
+                return bool(value)
+        return False
+
+    @rx.var
+    def proposal_summary(self) -> dict[str, int]:
+        _ = self.refresh_token
+        proposals = db.get_user_proposals(self.authenticated_user or "")
+        summary = {
+            "total": len(proposals),
+            "submitted": 0,
+            "under_review": 0,
+            "approved": 0,
+        }
+        for proposal in proposals:
+            status = proposal.get("status", "")
+            if status == "Submitted":
+                summary["submitted"] += 1
+            elif status == "Under Review":
+                summary["under_review"] += 1
+            elif status == "Approved":
+                summary["approved"] += 1
+        return summary
+
+    @rx.var
+    def total_proposals_count(self) -> int:
+        return self.proposal_summary["total"]
+
+    @rx.var
+    def under_review_count(self) -> int:
+        return self.proposal_summary["under_review"]
+
+    @rx.var
+    def approved_count(self) -> int:
+        return self.proposal_summary["approved"]
 
     def _validate_form(self) -> bool:
         self.full_name_error = "" if self.full_name else "Full name is required."
@@ -75,6 +133,7 @@ class ProposalState(AuthState):
             self.loading = False
             yield rx.toast.error("Please correct the errors in the form.")
             return
+        timestamp = datetime.datetime.now().isoformat()
         new_proposal = Proposal(
             id=str(uuid.uuid4()),
             user_email=self.authenticated_user or "",
@@ -85,11 +144,13 @@ class ProposalState(AuthState):
             title=self.title,
             description=self.description,
             proposal_file=self.proposal_file,
-            created_at=datetime.datetime.now().isoformat(),
+            created_at=timestamp,
+            updated_at=timestamp,
             status="Submitted",
             review_results="",
         )
         db.add_proposal(new_proposal)
+        self.refresh_token = datetime.datetime.now().isoformat()
         self.loading = False
         self._reset_proposal_form()
         yield rx.toast.success("Proposal submitted successfully!")
@@ -99,6 +160,24 @@ class ProposalState(AuthState):
     async def handle_update_proposal(self, files: list[rx.UploadFile]):
         self.loading = True
         yield
+        if not self.edit_proposal_id:
+            self.loading = False
+            yield rx.toast.error("Proposal not found.")
+            return
+        current = db.get_proposal(self.edit_proposal_id)
+        if (
+            not current
+            or current.get("user_email") != (self.authenticated_user or "")
+        ):
+            self.loading = False
+            yield rx.toast.error("Proposal not found.")
+            return
+        if current.get("status") != "Submitted":
+            self.loading = False
+            yield rx.toast.error(
+                "This proposal can no longer be edited because it is not in Submitted status."
+            )
+            return
         if files:
             upload_data = await files[0].read()
             file_path = rx.get_upload_dir() / files[0].name
@@ -106,12 +185,16 @@ class ProposalState(AuthState):
                 f.write(upload_data)
             self.proposal_file = files[0].name
             self.proposal_file_error = ""
+        else:
+            self.proposal_file = current.get("proposal_file", "")
         if not self._validate_form():
             self.loading = False
             yield rx.toast.error("Please correct the errors in the form.")
             return
-        if self.edit_proposal_id in db.proposals:
-            db.proposals[self.edit_proposal_id].update(
+        updated = False
+        if self.edit_proposal_id:
+            updated = db.update_proposal(
+                self.edit_proposal_id,
                 {
                     "full_name": self.full_name,
                     "email": self.proposal_email,
@@ -120,9 +203,16 @@ class ProposalState(AuthState):
                     "title": self.title,
                     "description": self.description,
                     "proposal_file": self.proposal_file,
-                }
+                },
             )
         self.loading = False
+        if not updated:
+            yield rx.toast.error("Proposal not found.")
+            return
+        latest = db.get_proposal(self.edit_proposal_id)
+        if latest:
+            self.selected_proposal = latest
+        self.refresh_token = datetime.datetime.now().isoformat()
         yield ProposalState.cancel_edit()
         yield rx.toast.success("Proposal updated successfully!")
         yield self.set_active_page("my_proposals")
@@ -142,21 +232,27 @@ class ProposalState(AuthState):
         self.title_error = ""
         self.description_error = ""
         self.proposal_file_error = ""
+        rx.clear_selected_files("proposal_upload")
 
     @rx.event
     def load_proposal_for_edit(self):
-        if self.selected_proposal:
-            self.is_editing = True
-            self.edit_proposal_id = self.selected_proposal["id"]
-            self.full_name = self.selected_proposal["full_name"]
-            self.proposal_email = self.selected_proposal["email"]
-            self.affiliation = self.selected_proposal["affiliation"]
-            self.phone_number = self.selected_proposal["phone_number"]
-            self.title = self.selected_proposal["title"]
-            self.description = self.selected_proposal["description"]
-            self.proposal_file = self.selected_proposal["proposal_file"]
-            self.show_detail_modal = False
-            return self.set_active_page("create_proposal")
+        if not self.selected_proposal:
+            return rx.toast.error("No proposal selected.")
+        if self.selected_proposal.get("status") != "Submitted":
+            return rx.toast.error(
+                "This proposal cannot be edited because it is already under review."
+            )
+        self.is_editing = True
+        self.edit_proposal_id = self.selected_proposal["id"]
+        self.full_name = self.selected_proposal["full_name"]
+        self.proposal_email = self.selected_proposal["email"]
+        self.affiliation = self.selected_proposal["affiliation"]
+        self.phone_number = self.selected_proposal["phone_number"]
+        self.title = self.selected_proposal["title"]
+        self.description = self.selected_proposal["description"]
+        self.proposal_file = self.selected_proposal["proposal_file"]
+        self.show_detail_modal = False
+        return self.set_active_page("create_proposal")
 
     @rx.event
     def cancel_edit(self):
@@ -165,9 +261,103 @@ class ProposalState(AuthState):
         self._reset_proposal_form()
         return self.set_active_page("my_proposals")
 
+    @rx.event
+    def start_new_proposal(self):
+        """Prepare the state for creating a brand new proposal."""
+        self.is_editing = False
+        self.edit_proposal_id = ""
+        self.selected_proposal = None
+        self.show_detail_modal = False
+        self._reset_proposal_form()
+        self.active_page = "create_proposal"
+
+    @rx.event
+    def remove_selected_upload(self, event: PointerEventInfo | None = None):
+        """Allow users to clear the currently selected upload before submission."""
+        self.proposal_file = ""
+        self.proposal_file_error = ""
+        return rx.clear_selected_files("proposal_upload")
+
+    @rx.event
+    def prompt_delete_proposal(self, proposal_id: str):
+        current = db.get_proposal(proposal_id)
+        if not current or current.get("user_email") != (self.authenticated_user or ""):
+            return rx.toast.error("You cannot delete this proposal.")
+        if current.get("status") != "Submitted":
+            return rx.toast.error(
+                "Only proposals in Submitted status can be deleted."
+            )
+        self.pending_delete_proposal = current
+        self.show_delete_confirm = True
+
+    @rx.event
+    def cancel_delete_prompt(self):
+        self.pending_delete_proposal = None
+        self.show_delete_confirm = False
+
+    def _delete_proposal_internal(self, proposal_id: str):
+        current = db.get_proposal(proposal_id)
+        if not current or current.get("user_email") != (self.authenticated_user or ""):
+            return rx.toast.error("You cannot delete this proposal.")
+        if current.get("status") != "Submitted":
+            return rx.toast.error(
+                "Only proposals in Submitted status can be deleted."
+            )
+        deleted = db.delete_proposal(proposal_id)
+        if not deleted:
+            return rx.toast.error("Failed to delete the proposal.")
+        file_name = current.get("proposal_file")
+        if isinstance(file_name, str) and file_name:
+            upload_dir = rx.get_upload_dir()
+            project_upload_dir = Path(__file__).resolve().parent.parent / "uploaded_files"
+            candidate_paths = []
+            try:
+                candidate_paths.append((upload_dir / file_name).resolve())
+            except Exception:
+                pass
+            try:
+                candidate_paths.append((project_upload_dir / file_name).resolve())
+            except Exception:
+                pass
+            seen_paths = set()
+            for path in candidate_paths:
+                if path in seen_paths:
+                    continue
+                seen_paths.add(path)
+                try:
+                    if path.exists():
+                        path.unlink()
+                except OSError:
+                    pass
+        if self.selected_proposal and self.selected_proposal["id"] == proposal_id:
+            self.selected_proposal = None
+            self.show_detail_modal = False
+        self.refresh_token = datetime.datetime.now().isoformat()
+        return rx.toast.success("Proposal deleted successfully.")
+
+    @rx.event
+    def delete_proposal(self, proposal_id: str):
+        result = self._delete_proposal_internal(proposal_id)
+        if self.pending_delete_proposal and self.pending_delete_proposal["id"] == proposal_id:
+            self.pending_delete_proposal = None
+            self.show_delete_confirm = False
+        return result
+
+    @rx.event
+    def confirm_delete_proposal(self):
+        if not self.pending_delete_proposal:
+            self.show_delete_confirm = False
+            return rx.toast.error("Proposal not found.")
+        proposal_id = self.pending_delete_proposal["id"]
+        result = self._delete_proposal_internal(proposal_id)
+        self.pending_delete_proposal = None
+        self.show_delete_confirm = False
+        return result
+
     @rx.var
     def filtered_proposals(self) -> list[Proposal]:
         """Filters proposals based on search query and status."""
+        _ = self.refresh_token
         proposals = db.get_user_proposals(self.authenticated_user or "")
         search_lower = self.search_query.lower()
         return [
@@ -183,8 +373,14 @@ class ProposalState(AuthState):
     @rx.event
     def view_proposal_details(self, proposal: Proposal):
         """Sets the selected proposal and shows the detail modal."""
-        self.selected_proposal = proposal
-        self.show_detail_modal = True
+        latest = db.get_proposal(proposal["id"])
+        if latest and latest.get("user_email") == (self.authenticated_user or ""):
+            self.selected_proposal = latest
+            self.show_detail_modal = True
+        else:
+            self.selected_proposal = None
+            self.show_detail_modal = False
+            return rx.toast.error("Unable to load the latest proposal details.")
 
     @rx.event
     def close_detail_modal(self):
@@ -193,7 +389,23 @@ class ProposalState(AuthState):
         self.selected_proposal = None
 
     @rx.event
-    def download_proposal_file(self):
+    def download_proposal_file(
+        self, event: PointerEventInfo | None = None, filename: str | None = None
+    ):
         """Downloads the proposal file for the selected proposal."""
         if self.selected_proposal:
-            return rx.download(filename=self.selected_proposal["proposal_file"])
+            target = filename or self.selected_proposal["proposal_file"]
+            if target:
+                return rx.download(filename=target)
+
+    @rx.event
+    def refresh_proposals(self):
+        if self.selected_proposal:
+            latest = db.get_proposal(self.selected_proposal["id"])
+            if latest and latest.get("user_email") == (self.authenticated_user or ""):
+                self.selected_proposal = latest
+            else:
+                self.selected_proposal = None
+                self.show_detail_modal = False
+        self.refresh_token = datetime.datetime.now().isoformat()
+        return rx.toast.success("Proposals refreshed from the latest data.")
