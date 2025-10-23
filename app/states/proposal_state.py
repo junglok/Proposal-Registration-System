@@ -124,11 +124,16 @@ class ProposalState(AuthState):
             self.loading = False
             yield rx.toast.error("Please upload a proposal document.")
             return
-        upload_data = await files[0].read()
-        file_path = rx.get_upload_dir() / files[0].name
+        upload = files[0]
+        upload_data = await upload.read()
+        original_name = Path(upload.name).name
+        timestamp = datetime.datetime.now().strftime("%Y%m%d%H%M%S")
+        safe_path = Path(original_name)
+        unique_name = f"{safe_path.stem}_{timestamp}{safe_path.suffix}"
+        file_path = rx.get_upload_dir() / unique_name
         with file_path.open("wb") as f:
             f.write(upload_data)
-        self.proposal_file = files[0].name
+        self.proposal_file = unique_name
         if not self._validate_form():
             self.loading = False
             yield rx.toast.error("Please correct the errors in the form.")
@@ -180,10 +185,14 @@ class ProposalState(AuthState):
             return
         if files:
             upload_data = await files[0].read()
-            file_path = rx.get_upload_dir() / files[0].name
+            original_name = Path(files[0].name).name
+            timestamp = datetime.datetime.now().strftime("%Y%m%d%H%M%S")
+            safe_path = Path(original_name)
+            unique_name = f"{safe_path.stem}_{timestamp}{safe_path.suffix}"
+            file_path = rx.get_upload_dir() / unique_name
             with file_path.open("wb") as f:
                 f.write(upload_data)
-            self.proposal_file = files[0].name
+            self.proposal_file = unique_name
             self.proposal_file_error = ""
         else:
             self.proposal_file = current.get("proposal_file", "")
