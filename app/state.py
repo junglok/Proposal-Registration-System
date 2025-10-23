@@ -1,6 +1,5 @@
 import reflex as rx
 import re
-import time
 import bcrypt
 from typing import Any, Optional, TypedDict
 import datetime
@@ -410,7 +409,6 @@ class AuthState(rx.State):
             return rx.toast.error("Please correct the errors before submitting.")
         self.loading = True
         yield
-        time.sleep(1)
         user = db.get_user(self.email)
         if user and bcrypt.checkpw(
             self.password.encode("utf-8"), user.password_hash.encode("utf-8")
@@ -435,7 +433,6 @@ class AuthState(rx.State):
             return rx.toast.error("Please correct the errors before submitting.")
         self.loading = True
         yield
-        time.sleep(1)
         if db.get_user(self.email):
             self.loading = False
             yield rx.toast.error("User with this email already exists.")
@@ -639,6 +636,7 @@ class AuthState(rx.State):
         self.new_password_error = None
         return True
 
+    @rx.event
     def issue_temporary_password(self):
         self._validate_reset_email()
         if self.reset_error:
