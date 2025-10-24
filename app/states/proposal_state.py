@@ -7,6 +7,10 @@ from pathlib import Path
 from reflex.event import PointerEventInfo
 
 
+MAX_UPLOAD_SIZE_BYTES = 10 * 1024 * 1024  # 10 MB
+ALLOWED_EXTENSIONS = {".pdf", ".doc", ".docx", ".ppt", ".pptx", ".hwp", ".hwpx"}
+
+
 class ProposalState(AuthState):
     full_name: str = ""
     proposal_email: str = ""
@@ -125,17 +129,42 @@ class ProposalState(AuthState):
             yield rx.toast.error("Please upload a proposal document.")
             return
         upload = files[0]
+        original_name = Path(getattr(upload, "name", "")).name
+        if not original_name:
+            self.proposal_file_error = "Invalid file upload."
+            self.loading = False
+            yield rx.toast.error("Unable to process the uploaded file.")
+            return
+        extension = Path(original_name).suffix.lower()
+        if extension not in ALLOWED_EXTENSIONS:
+            allowed = ", ".join(sorted(ext.lstrip(".") for ext in ALLOWED_EXTENSIONS))
+            self.proposal_file_error = f"Only the following file types are allowed: {allowed}."
+            self.loading = False
+            yield rx.toast.error("Unsupported file type uploaded.")
+            return
         upload_data = await upload.read()
-        original_name = Path(upload.name).name
+        if len(upload_data) > MAX_UPLOAD_SIZE_BYTES:
+            self.proposal_file_error = "File exceeds the 10 MB size limit."
+            self.loading = False
+            yield rx.toast.error("Uploaded file is too large.")
+            return
         timestamp = datetime.datetime.now().strftime("%Y%m%d%H%M%S")
         safe_path = Path(original_name)
         unique_name = f"{safe_path.stem}_{timestamp}{safe_path.suffix}"
         file_path = rx.get_upload_dir() / unique_name
-        with file_path.open("wb") as f:
-            f.write(upload_data)
+        try:
+            with file_path.open("wb") as f:
+                f.write(upload_data)
+        except OSError:
+            self.proposal_file_error = "Failed to save the uploaded file."
+            self.loading = False
+            yield rx.toast.error("Could not store the uploaded file.")
+            return
         self.proposal_file = unique_name
         if not self._validate_form():
             self.loading = False
+            self._remove_uploaded_file(unique_name)
+            self.proposal_file = ""
             yield rx.toast.error("Please correct the errors in the form.")
             return
         timestamp = datetime.datetime.now().isoformat()
@@ -183,21 +212,50 @@ class ProposalState(AuthState):
                 "This proposal can no longer be edited because it is not in Submitted status."
             )
             return
+        new_file_name = ""
         if files:
-            upload_data = await files[0].read()
-            original_name = Path(files[0].name).name
+            upload = files[0]
+            original_name = Path(getattr(upload, "name", "")).name
+            if not original_name:
+                self.proposal_file_error = "Invalid file upload."
+                self.loading = False
+                yield rx.toast.error("Unable to process the uploaded file.")
+                return
+            extension = Path(original_name).suffix.lower()
+            if extension not in ALLOWED_EXTENSIONS:
+                allowed = ", ".join(sorted(ext.lstrip(".") for ext in ALLOWED_EXTENSIONS))
+                self.proposal_file_error = f"Only the following file types are allowed: {allowed}."
+                self.loading = False
+                yield rx.toast.error("Unsupported file type uploaded.")
+                return
+            upload_data = await upload.read()
+            if len(upload_data) > MAX_UPLOAD_SIZE_BYTES:
+                self.proposal_file_error = "File exceeds the 10 MB size limit."
+                self.loading = False
+                yield rx.toast.error("Uploaded file is too large.")
+                return
             timestamp = datetime.datetime.now().strftime("%Y%m%d%H%M%S")
             safe_path = Path(original_name)
             unique_name = f"{safe_path.stem}_{timestamp}{safe_path.suffix}"
             file_path = rx.get_upload_dir() / unique_name
-            with file_path.open("wb") as f:
-                f.write(upload_data)
+            try:
+                with file_path.open("wb") as f:
+                    f.write(upload_data)
+            except OSError:
+                self.proposal_file_error = "Failed to save the uploaded file."
+                self.loading = False
+                yield rx.toast.error("Could not store the uploaded file.")
+                return
+            new_file_name = unique_name
             self.proposal_file = unique_name
             self.proposal_file_error = ""
         else:
             self.proposal_file = current.get("proposal_file", "")
         if not self._validate_form():
             self.loading = False
+            if new_file_name:
+                self._remove_uploaded_file(new_file_name)
+                self.proposal_file = current.get("proposal_file", "")
             yield rx.toast.error("Please correct the errors in the form.")
             return
         updated = False
@@ -216,8 +274,15 @@ class ProposalState(AuthState):
             )
         self.loading = False
         if not updated:
+            if new_file_name:
+                self._remove_uploaded_file(new_file_name)
+                self.proposal_file = current.get("proposal_file", "")
             yield rx.toast.error("Proposal not found.")
             return
+        if new_file_name:
+            old_file = current.get("proposal_file")
+            if isinstance(old_file, str) and old_file and old_file != new_file_name:
+                self._remove_uploaded_file(old_file)
         latest = db.get_proposal(self.edit_proposal_id)
         if latest:
             self.selected_proposal = latest
@@ -225,6 +290,28 @@ class ProposalState(AuthState):
         yield ProposalState.cancel_edit()
         yield rx.toast.success("Proposal updated successfully!")
         yield self.set_active_page("my_proposals")
+
+    def _remove_uploaded_file(self, file_name: str):
+        if not file_name:
+            return
+        upload_dir = rx.get_upload_dir()
+        project_upload_dir = Path(__file__).resolve().parent.parent / "uploaded_files"
+        candidate_paths = []
+        for base in (upload_dir, project_upload_dir):
+            try:
+                candidate_paths.append((base / file_name).resolve())
+            except Exception:
+                continue
+        seen_paths: set[Path] = set()
+        for path in candidate_paths:
+            if path in seen_paths:
+                continue
+            seen_paths.add(path)
+            try:
+                if path.exists():
+                    path.unlink()
+            except OSError:
+                pass
 
     def _reset_proposal_form(self):
         self.full_name = ""
