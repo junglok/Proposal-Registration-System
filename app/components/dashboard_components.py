@@ -750,7 +750,21 @@ def proposal_detail_modal() -> rx.Component:
                                     ProposalState.selected_proposal["created_at"]
                                     .to_string()
                                     .replace("T", " ")
-                                    .split(".")[0]
+                                    .split(".")[0][1:]
+                                ),
+                                class_name=rx.cond(
+                                    AuthState.dark_mode,
+                                    "text-sm text-slate-200",
+                                    "text-sm text-slate-700",
+                                ),
+                            ),
+                            rx.el.div(
+                                rx.el.h3("Last Updated", class_name="font-semibold"),
+                                rx.el.p(
+                                    ProposalState.selected_proposal["updated_at"]
+                                    .to_string()
+                                    .replace("T", " ")
+                                    .split(".")[0][1:]
                                 ),
                                 class_name=rx.cond(
                                     AuthState.dark_mode,

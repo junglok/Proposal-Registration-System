@@ -7,7 +7,7 @@ from pathlib import Path
 from reflex.event import PointerEventInfo
 
 
-MAX_UPLOAD_SIZE_BYTES = 10 * 1024 * 1024  # 10 MB
+MAX_UPLOAD_SIZE_BYTES = 50 * 1024 * 1024  # 50 MB
 ALLOWED_EXTENSIONS = {".pdf", ".doc", ".docx", ".ppt", ".pptx", ".hwp", ".hwpx"}
 
 
