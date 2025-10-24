@@ -144,7 +144,7 @@ class ProposalState(AuthState):
             return
         upload_data = await upload.read()
         if len(upload_data) > MAX_UPLOAD_SIZE_BYTES:
-            self.proposal_file_error = "File exceeds the 10 MB size limit."
+            self.proposal_file_error = "File exceeds the 50 MB size limit."
             self.loading = False
             yield rx.toast.error("Uploaded file is too large.")
             return
